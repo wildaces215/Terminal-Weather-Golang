@@ -5,11 +5,26 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
+	"time"
 )
 
-//types
+type PointsResponse struct {
+	Properties struct {
+		ForecastHourly string `json:"forecastHourly"`
+	} `json:"properties"`
+}
+
+type HourlyForecastResponse struct {
+	Properties struct {
+		Periods []struct {
+			StartTime       time.Time `json:"startTime"`
+			Temperature     int       `json:"temperature"`
+			TemperatureUnit string    `json:"temperatureUnit"`
+			ShortForecast   string    `json:"shortForecast"`
+		} `json:"periods"`
+	} `json:"properties"`
+}
 
 type GeoCoordinates struct {
 	CountryCode string  `json:"country_code"`
@@ -21,55 +36,6 @@ type GeoCoordinates struct {
 	IPv4        string  `json:"IPv4"`
 	State       string  `json:"state"`
 }
-
-type Weather struct {
-	Context  []interface{} `json:"@context"`
-	ID       string        `json:"id"`
-	Type     string        `json:"type"`
-	Geometry struct {
-		Type        string    `json:"type"`
-		Coordinates []float64 `json:"coordinates"`
-	} `json:"geometry"`
-	Properties struct {
-		ID                  string `json:"@id"`
-		Type                string `json:"@type"`
-		Cwa                 string `json:"cwa"`
-		ForecastOffice      string `json:"forecastOffice"`
-		GridID              string `json:"gridId"`
-		GridX               int    `json:"gridX"`
-		GridY               int    `json:"gridY"`
-		Forecast            string `json:"forecast"`
-		ForecastHourly      string `json:"forecastHourly"`
-		ForecastGridData    string `json:"forecastGridData"`
-		ObservationStations string `json:"observationStations"`
-		RelativeLocation    struct {
-			Type     string `json:"type"`
-			Geometry struct {
-				Type        string    `json:"type"`
-				Coordinates []float64 `json:"coordinates"`
-			} `json:"geometry"`
-			Properties struct {
-				City     string `json:"city"`
-				State    string `json:"state"`
-				Distance struct {
-					UnitCode string  `json:"unitCode"`
-					Value    float64 `json:"value"`
-				} `json:"distance"`
-				Bearing struct {
-					UnitCode string `json:"unitCode"`
-					Value    int    `json:"value"`
-				} `json:"bearing"`
-			} `json:"properties"`
-		} `json:"relativeLocation"`
-		ForecastZone    string `json:"forecastZone"`
-		County          string `json:"county"`
-		FireWeatherZone string `json:"fireWeatherZone"`
-		TimeZone        string `json:"timeZone"`
-		RadarStation    string `json:"radarStation"`
-	} `json:"properties"`
-}
-
-//This gets the public ip address
 
 func getIpAddress() (string, error) {
 	url := "https://api.ipify.org"
@@ -109,37 +75,75 @@ func getGeoCoordinates(ipAddr string) (float64, float64, error) {
 	return geo.Latitude, geo.Longitude, err
 }
 
-// Calls to the NOAA api to retrieve the  hourly weather forecast
-func getWeatherHourlyURL(lat, long string) (string, error) {
-	url := "https://api.weather.gov/points/" + lat + "," + long
-	resp, err := http.Get(url)
+func getHourlyWeather(latitude, longitude float64) (string, error) {
+	// Step 1: Get forecast office and grid coordinates
+	pointsURL := fmt.Sprintf("https://api.weather.gov/points/%.4f,%.4f", latitude, longitude)
+	pointsResp, err := http.Get(pointsURL)
 	if err != nil {
-		fmt.Println(err)
+		return "", fmt.Errorf("error fetching points data: %v", err)
 	}
-	var weather Weather
+	defer pointsResp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	err2 := json.Unmarshal(body, &weather)
-	if err2 != nil {
-		fmt.Println("Error:", err2)
+	if pointsResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("error: unable to fetch data. Status code: %d", pointsResp.StatusCode)
 	}
-	return weather.Properties.ForecastHourly, err2
+
+	var pointsData PointsResponse
+	if err := json.NewDecoder(pointsResp.Body).Decode(&pointsData); err != nil {
+		return "", fmt.Errorf("error decoding points response: %v", err)
+	}
+
+	// Step 2: Get the hourly forecast
+	forecastResp, err := http.Get(pointsData.Properties.ForecastHourly)
+	if err != nil {
+		return "", fmt.Errorf("error fetching hourly forecast data: %v", err)
+	}
+	defer forecastResp.Body.Close()
+
+	if forecastResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("error: unable to fetch hourly forecast. Status code: %d", forecastResp.StatusCode)
+	}
+
+	var forecastData HourlyForecastResponse
+	if err := json.NewDecoder(forecastResp.Body).Decode(&forecastData); err != nil {
+		return "", fmt.Errorf("error decoding hourly forecast response: %v", err)
+	}
+
+	if len(forecastData.Properties.Periods) == 0 {
+		return "", fmt.Errorf("no hourly forecast data available")
+	}
+
+	var result string
+	for i, period := range forecastData.Properties.Periods {
+		if i >= 12 { // Limit to next 12 hours
+			break
+		}
+		result += fmt.Sprintf("Time: %s\nTemperature: %d°%s\nForecast: %s\n\n",
+			period.StartTime.Format("2006-01-02 15:04 MST"),
+			period.Temperature,
+			period.TemperatureUnit,
+			period.ShortForecast)
+	}
+
+	return result, nil
 }
 
 func main() {
-
 	addr, err := getIpAddress()
 	if err != nil {
 		fmt.Println(err)
 	}
-
 	lat, long, err2 := getGeoCoordinates(addr)
 	if err2 != nil {
 		fmt.Println(err2)
 	}
-	hourlyURL, err3 := getWeatherHourlyURL(strconv.FormatFloat(lat, 'f', -1, 64), strconv.FormatFloat(long, 'f', -1, 64))
-	if err3 != nil {
-		fmt.Println(err3)
+
+	weather, err := getHourlyWeather(lat,long)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
 	}
-	fmt.Println(hourlyURL)
+
+	fmt.Println("Hourly Weather Forecast:")
+	fmt.Println(weather)
 }
